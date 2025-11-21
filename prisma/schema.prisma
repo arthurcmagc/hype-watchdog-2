@@ -1,0 +1,75 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Site {
+  id               Int           @id @default(autoincrement())
+  name             String
+  externalSiteId   String        @unique
+  isActive         Boolean       @default(true)
+  normalizedStatus String?       // ONLINE / OFFLINE / UNSTABLE / UNKNOWN
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  devices          Device[]
+  events           DeviceEvent[]
+  apiLogs          ApiLog[]
+}
+
+model Device {
+  id                 Int       @id @default(autoincrement())
+  siteId             Int
+  externalDeviceId   String
+  name               String?
+  modelType          String?
+  ipAddress          String?
+  rawStatus          String?
+  normalizedStatus   String?   // ONLINE / OFFLINE / UNSTABLE / UNKNOWN
+  lastSeenAt         DateTime?
+  lastStatusChangeAt DateTime?
+  vendor             String?   @default("unifi")
+
+  isPrimaryHost      Boolean   @default(false)
+  wan1Status         String?   // ONLINE / OFFLINE / UNKNOWN
+  wan2Status         String?
+  wan1LastChange     DateTime?
+  wan2LastChange     DateTime?
+
+  site               Site      @relation(fields: [siteId], references: [id])
+  events             DeviceEvent[]
+  apiLogs            ApiLog[]
+}
+
+model DeviceEvent {
+  id         Int       @id @default(autoincrement())
+  deviceId   Int
+  siteId     Int
+  eventType  String    // status_change, test_alert, etc.
+  severity   String    // INFO, WARNING, CRITICAL
+  title      String
+  message    String?
+  rawPayload String?
+  createdAt  DateTime  @default(now())
+
+  device     Device    @relation(fields: [deviceId], references: [id])
+  site       Site      @relation(fields: [siteId], references: [id])
+}
+
+model ApiLog {
+  id                 Int       @id @default(autoincrement())
+  siteId             Int?
+  deviceId           Int?
+  context            String
+  rawStatusFromApi   String?
+  calculatedStatus   String?
+  reason             String?
+  createdAt          DateTime  @default(now())
+
+  site               Site?     @relation(fields: [siteId], references: [id])
+  device             Device?   @relation(fields: [deviceId], references: [id])
+}
