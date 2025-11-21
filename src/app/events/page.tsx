@@ -1,209 +1,219 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 
-type SeverityFilter = "ALL" | "CRITICAL" | "WARNING" | "INFO";
+type Severity = "ALL" | "CRITICAL" | "WARNING" | "INFO";
 
 type EventItem = {
   id: number;
   siteName: string;
   deviceName: string;
-  severity: string;
+  severity: "CRITICAL" | "WARNING" | "INFO";
   title: string;
-  message: string | null;
+  message?: string | null;
   eventType: string;
   createdAt: string;
   isPrimaryHost: boolean;
 };
 
-export default function EventsPage() {
+function formatDate(dateStr: string) {
+  const date = new Date(dateStr);
+  return date.toLocaleString("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function severityLabel(severity: string) {
+  switch (severity) {
+    case "CRITICAL":
+      return "Critical";
+    case "WARNING":
+      return "Warning";
+    case "INFO":
+    default:
+      return "Info";
+  }
+}
+
+function severityBadgeClasses(severity: string) {
+  switch (severity) {
+    case "CRITICAL":
+      return "bg-rose-900/40 text-rose-300 border border-rose-500/40";
+    case "WARNING":
+      return "bg-amber-900/40 text-amber-300 border border-amber-500/40";
+    case "INFO":
+    default:
+      return "bg-sky-900/40 text-sky-300 border border-sky-500/40";
+  }
+}
+
+function EventsPageInner() {
   const searchParams = useSearchParams();
-  const tvMode = searchParams.get("tv") === "1";
+  const isTvMode = searchParams.get("tv") === "1";
 
   const [events, setEvents] = useState<EventItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [severity, setSeverity] = useState<SeverityFilter>("ALL");
-  const [primaryOnly, setPrimaryOnly] = useState<boolean>(false);
-  const [refreshToken, setRefreshToken] = useState(0);
+  const [severityFilter, setSeverityFilter] = useState<Severity>("ALL");
+  const [includeAllDevices, setIncludeAllDevices] = useState(true);
 
-  // Auto-refresh a cada 30s em TV Mode
-  useEffect(() => {
-    if (!tvMode) return;
-
-    const id = setInterval(() => {
-      setRefreshToken((t) => t + 1);
-    }, 30_000);
-
-    return () => clearInterval(id);
-  }, [tvMode]);
-
-  useEffect(() => {
-    async function loadEvents() {
-      try {
-        setLoading(true);
-        const params = new URLSearchParams({
-          severity,
-          primaryOnly: primaryOnly ? "true" : "false",
-        });
-
-        const res = await fetch(`/api/events?${params.toString()}`);
-        if (!res.ok) {
-          throw new Error(`Erro HTTP ${res.status}`);
-        }
-
-        const data = (await res.json()) as EventItem[];
-        setEvents(data);
-        setError(null);
-      } catch (err) {
-        console.error(err);
-        setError("Falha ao carregar eventos.");
-      } finally {
-        setLoading(false);
-      }
+  async function loadEvents() {
+    try {
+      setLoading(true);
+      const res = await fetch("/api/events");
+      if (!res.ok) throw new Error("Erro ao carregar eventos");
+      const data = (await res.json()) as EventItem[];
+      setEvents(data);
+    } catch (err) {
+      console.error("Erro ao buscar /api/events:", err);
+    } finally {
+      setLoading(false);
     }
-
-    loadEvents();
-  }, [severity, primaryOnly, refreshToken]);
-
-  const severityOptions: { key: SeverityFilter; label: string }[] = [
-    { key: "ALL", label: "All" },
-    { key: "CRITICAL", label: "Critical" },
-    { key: "WARNING", label: "Warning" },
-    { key: "INFO", label: "Info" },
-  ];
-
-  function severityClasses(s: string) {
-    const sev = s.toUpperCase();
-    if (sev === "CRITICAL")
-      return "bg-rose-500/10 text-rose-300 border-rose-500/40";
-    if (sev === "WARNING")
-      return "bg-amber-500/10 text-amber-300 border-amber-500/40";
-    if (sev === "INFO")
-      return "bg-sky-500/10 text-sky-300 border-sky-500/40";
-    return "bg-slate-500/10 text-slate-300 border-slate-500/40";
   }
+
+  useEffect(() => {
+    loadEvents();
+  }, []);
+
+  // TV mode: auto-refresh a cada 30s
+  useEffect(() => {
+    if (!isTvMode) return;
+    const id = setInterval(() => {
+      loadEvents();
+    }, 30000);
+    return () => clearInterval(id);
+  }, [isTvMode]);
+
+  const filtered = events.filter((evt) => {
+    if (!includeAllDevices && !evt.isPrimaryHost) return false;
+    if (severityFilter === "ALL") return true;
+    return evt.severity === severityFilter;
+  });
 
   return (
     <div className="space-y-6">
-      {!tvMode && (
+      {/* Header */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight text-slate-50">
-            Events & Alerts
+          <h1 className="text-xl font-semibold text-slate-50">
+            Events &amp; Alerts
           </h1>
           <p className="text-sm text-slate-400">
-            Monitor device status changes and alerts.
+            Monitor device status changes and alerts
+            {isTvMode && " • Atualizando automaticamente (TV mode)"}
           </p>
         </div>
-      )}
 
-      {tvMode && (
-        <div className="flex items-baseline justify-between">
-          <h1 className="text-2xl font-semibold tracking-tight text-slate-50">
-            Events & Alerts
-          </h1>
-          <p className="text-xs text-slate-500">
-            Atualizando automaticamente (TV mode)
-          </p>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-300">
+            Filtro: {severityFilter === "ALL" ? "Todos" : severityFilter}
+          </span>
+          <span className="rounded-full bg-slate-800 px-3 py-1 text-slate-300">
+            {includeAllDevices ? "Incluindo todos os devices" : "Somente hosts principais"}
+          </span>
         </div>
-      )}
+      </div>
 
       {/* Filtros */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/40 px-4 py-3 text-xs">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-slate-400">Filter by severity:</span>
-          <div className="flex flex-wrap gap-2">
-            {severityOptions.map((opt) => {
-              const active = severity === opt.key;
-              return (
-                <button
-                  key={opt.key}
-                  onClick={() => setSeverity(opt.key)}
-                  className={[
-                    "rounded-full border px-3 py-1 text-[11px] font-semibold transition",
-                    active
-                      ? "border-indigo-500 bg-indigo-500/20 text-indigo-100"
-                      : "border-slate-700 bg-slate-900 text-slate-300 hover:border-indigo-500/60",
-                  ].join(" ")}
-                >
-                  {opt.label}
-                </button>
-              );
-            })}
-          </div>
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3">
+        <div className="flex flex-wrap gap-2 text-xs">
+          {(["ALL", "CRITICAL", "WARNING", "INFO"] as Severity[]).map((level) => (
+            <button
+              key={level}
+              onClick={() => setSeverityFilter(level)}
+              className={[
+                "rounded-full px-3 py-1 font-medium transition",
+                severityFilter === level
+                  ? "bg-slate-50 text-slate-900"
+                  : "bg-slate-800 text-slate-300 hover:bg-slate-700",
+              ].join(" ")}
+            >
+              {level === "ALL" ? "All" : level.charAt(0) + level.slice(1).toLowerCase()}
+            </button>
+          ))}
         </div>
 
         <button
-          onClick={() => setPrimaryOnly((p) => !p)}
-          className={[
-            "rounded-full border px-3 py-1 text-[11px] font-semibold transition",
-            primaryOnly
-              ? "border-emerald-500 bg-emerald-500/20 text-emerald-100"
-              : "border-slate-700 bg-slate-900 text-slate-300 hover:border-emerald-500/60",
-          ].join(" ")}
+          onClick={() => setIncludeAllDevices((v) => !v)}
+          className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-xs text-slate-200 hover:border-slate-500"
         >
-          {primaryOnly ? "Showing MAIN HOSTS only" : "Include all devices"}
+          {includeAllDevices ? "Include all devices" : "Only main hosts"}
         </button>
       </div>
 
       {/* Lista de eventos */}
-      <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
-        {error && (
-          <div className="mb-3 rounded-lg border border-rose-500/40 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
-            {error}
+      <div className="space-y-3">
+        {loading && (
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
+            Carregando eventos...
           </div>
         )}
 
-        {loading ? (
-          <p className="text-xs text-slate-500">Carregando eventos…</p>
-        ) : events.length === 0 ? (
-          <p className="text-xs text-slate-500">
-            Nenhum evento encontrado com os filtros atuais.
-          </p>
-        ) : (
-          <div className="space-y-3 text-xs">
-            {events.map((e) => (
-              <div
-                key={e.id}
-                className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-3"
-              >
-                <div className="mb-1 flex items-start justify-between gap-2">
-                  <div>
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-                      {e.siteName} • {e.deviceName}
-                    </p>
-                    <p className="text-sm font-semibold text-slate-100">
-                      {e.title}
-                    </p>
-                  </div>
-                  <span
-                    className={
-                      "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold " +
-                      severityClasses(e.severity)
-                    }
-                  >
-                    {e.severity.toUpperCase()}
-                  </span>
-                </div>
-                {e.message && (
-                  <p className="mb-1 text-[11px] text-slate-400">
-                    {e.message}
-                  </p>
-                )}
-                <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
-                  <span>Event Type: {e.eventType}</span>
-                  {e.isPrimaryHost && (
-                    <span className="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] font-semibold text-indigo-200">
-                      MAIN HOST
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
+        {!loading && filtered.length === 0 && (
+          <div className="rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-sm text-slate-400">
+            Nenhum evento encontrado para o filtro atual.
           </div>
         )}
+
+        {filtered.map((evt) => (
+          <div
+            key={evt.id}
+            className="rounded-xl border border-slate-800 bg-slate-900/70 px-4 py-3 shadow-sm"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div className="space-y-1">
+                <div className="text-xs font-semibold text-slate-400">
+                  {evt.siteName} • {evt.deviceName}
+                </div>
+                <div className="text-sm font-semibold text-slate-50">
+                  {evt.title}
+                </div>
+                {evt.message && (
+                  <div className="text-xs text-slate-400">{evt.message}</div>
+                )}
+                <div className="mt-1 text-[11px] text-slate-500">
+                  Event Type: <span className="uppercase">{evt.eventType}</span>
+                </div>
+              </div>
+
+              <div className="flex flex-col items-end gap-2 text-[11px]">
+                <span
+                  className={
+                    "rounded-full px-2 py-1 font-semibold " +
+                    severityBadgeClasses(evt.severity)
+                  }
+                >
+                  {severityLabel(evt.severity).toUpperCase()}
+                </span>
+
+                <span className="rounded-full bg-slate-800 px-2 py-1 text-slate-300">
+                  {evt.isPrimaryHost ? "MAIN HOST" : "DEVICE"}
+                </span>
+
+                <span className="text-slate-500">{formatDate(evt.createdAt)}</span>
+              </div>
+            </div>
+          </div>
+        ))}
       </div>
     </div>
+  );
+}
+
+export default function EventsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="py-6 text-sm text-slate-400">
+          Carregando eventos...
+        </div>
+      }
+    >
+      <EventsPageInner />
+    </Suspense>
   );
 }
