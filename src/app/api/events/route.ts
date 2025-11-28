@@ -1,55 +1,58 @@
+// src/app/api/events/route.ts
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import type { EventLike } from "@/lib/events";
 
-export async function GET(request: Request) {
+export async function GET(req: Request) {
   try {
-    const { searchParams } = new URL(request.url);
-    const severity = searchParams.get("severity") ?? "ALL"; // ALL | CRITICAL | WARNING | INFO
+    const searchParams = new URL(req.url).searchParams;
+
+    const severityParam = searchParams.get("severity"); // CRITICAL / WARNING / INFO / ALL
     const primaryOnly = searchParams.get("primaryOnly") === "true";
 
-    const where: any = {};
+    const where: { [key: string]: any } = {};
 
-    if (severity !== "ALL") {
-      where.severity = severity;
+    if (severityParam && severityParam !== "ALL") {
+      where.severity = severityParam.toUpperCase();
     }
 
     if (primaryOnly) {
-      // Apenas eventos de hosts principais
-      where.device = {
-        isPrimaryHost: true,
-      };
+      where.isPrimaryHost = true;
     }
 
-    const events = await prisma.deviceEvent.findMany({
+    const prismaAny = prisma as any;
+
+    const eventsDb = await prismaAny.event.findMany({
       where,
-      include: {
-        device: true,
-        site: true,
-      },
-      orderBy: {
-        createdAt: "desc",
-      },
-      take: 50,
+      orderBy: { createdAt: "desc" },
+      take: 200,
     });
 
-    const result = events.map((e) => ({
-      id: e.id,
-      siteName: e.site?.name ?? "Unknown site",
-      deviceName: e.device?.name ?? e.device?.externalDeviceId ?? "Unknown device",
-      severity: e.severity,
-      title: e.title,
-      message: e.message,
-      eventType: e.eventType,
-      createdAt: e.createdAt,
-      isPrimaryHost: e.device?.isPrimaryHost ?? false,
-    }));
+    const payload: EventLike[] = (eventsDb as any[]).map(
+      (ev: any): EventLike => ({
+        id: String(ev.id),
+        siteId: ev.siteId ?? null,
+        hostId: ev.hostId ?? null,
+        siteName: ev.siteName ?? "Unknown",
+        deviceName: ev.deviceName ?? null,
+        severity: ev.severity ?? "INFO",
+        type: ev.type ?? "GENERIC",
+        title: ev.title ?? "",
+        message: ev.message ?? null,
+        isPrimaryHost: !!ev.isPrimaryHost,
+        createdAt:
+          ev.createdAt instanceof Date
+            ? ev.createdAt.toISOString()
+            : String(ev.createdAt),
+      })
+    );
 
-    return NextResponse.json(result);
-  } catch (error) {
-    console.error("[GET /api/events] error:", error);
+    return NextResponse.json(payload, { status: 200 });
+  } catch (err) {
+    console.error("[API /events] erro:", err);
     return NextResponse.json(
-      { error: "Erro ao listar eventos." },
-      { status: 500 },
+      { error: "Erro ao carregar eventos." },
+      { status: 500 }
     );
   }
 }

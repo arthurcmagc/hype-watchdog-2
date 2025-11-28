@@ -1,347 +1,585 @@
-// src/app/page.tsx
-'use client';
+"use client";
 
-import { useEffect, useState } from 'react';
+import React, {
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import type { SiteStatusSummary } from "@/lib/siteStatus";
 
-type NormalizedStatus = 'ONLINE' | 'UNSTABLE' | 'OFFLINE' | 'UNKNOWN';
+// --------- TIPOS --------- //
 
-interface UnifiApiDevice {
-  id?: string;
-  mac?: string;
-  model?: string;
-  name?: string;
-  ipAddress?: string;
-  status?: string;
-}
-
-interface UnifiApiHost {
-  hostId: string;
-  hostName: string;
-  devices: UnifiApiDevice[];
-}
-
-interface DashboardHostSummary {
-  hostName: string;
-  totalDevices: number;
-  byStatus: Record<NormalizedStatus, number>;
-  overallStatus: NormalizedStatus;
-}
-
-interface DashboardData {
-  hosts: DashboardHostSummary[];
-  totals: Record<NormalizedStatus, number>;
-}
-
-function normalizeDeviceStatus(status?: string): NormalizedStatus {
-  const s = (status || '').toLowerCase();
-
-  if (s === 'online') return 'ONLINE';
-  if (s === 'offline') return 'OFFLINE';
-
-  // Se a UniFi mandar algum outro status tipo 'disconnected', 'unknown', etc.
-  if (s.includes('unstable') || s.includes('degraded')) return 'UNSTABLE';
-
-  return 'UNKNOWN';
-}
-
-function computeOverallStatus(byStatus: Record<NormalizedStatus, number>): NormalizedStatus {
-  const { ONLINE, UNSTABLE, OFFLINE, UNKNOWN } = byStatus;
-
-  const totalKnown = ONLINE + UNSTABLE + OFFLINE;
-
-  if (totalKnown === 0 && UNKNOWN > 0) return 'UNKNOWN';
-  if (ONLINE > 0 && OFFLINE === 0 && UNSTABLE === 0) return 'ONLINE';
-  if (OFFLINE > 0 && ONLINE === 0 && UNSTABLE === 0) return 'OFFLINE';
-  if (ONLINE > 0 && OFFLINE > 0) return 'UNSTABLE';
-  if (UNSTABLE > 0) return 'UNSTABLE';
-
-  return 'UNKNOWN';
-}
-
-function extractHostsFromApi(json: any): UnifiApiHost[] {
-  // /api/unifi-cloud/devices atualmente devolve algo como:
-  // { data: [ { hostId, hostName, devices: [...] }, ... ] }
-  if (Array.isArray(json?.data)) return json.data as UnifiApiHost[];
-  if (Array.isArray(json?.data?.data)) return json.data.data as UnifiApiHost[];
-
-  return [];
-}
-
-async function fetchDashboardData(): Promise<DashboardData> {
-  const res = await fetch('/api/unifi-cloud/devices');
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status}`);
-  }
-
-  const json = await res.json();
-  const hostsFromApi = extractHostsFromApi(json);
-
-  const hostMap = new Map<string, DashboardHostSummary>();
-
-  for (const host of hostsFromApi) {
-    const hostName = host.hostName || 'Unknown host';
-    let summary = hostMap.get(hostName);
-
-    if (!summary) {
-      summary = {
-        hostName,
-        totalDevices: 0,
-        byStatus: {
-          ONLINE: 0,
-          UNSTABLE: 0,
-          OFFLINE: 0,
-          UNKNOWN: 0,
-        },
-        overallStatus: 'UNKNOWN',
-      };
-      hostMap.set(hostName, summary);
-    }
-
-    for (const device of host.devices || []) {
-      const nStatus = normalizeDeviceStatus(device.status);
-      summary.byStatus[nStatus]++;
-      summary.totalDevices++;
-    }
-  }
-
-  const totals: Record<NormalizedStatus, number> = {
-    ONLINE: 0,
-    UNSTABLE: 0,
-    OFFLINE: 0,
-    UNKNOWN: 0,
+type SitesApiResponse = {
+  ok: boolean;
+  stats: {
+    totalSites: number;
+    online: number;
+    unstable: number;
+    offline: number;
+    unknown: number;
+    operational: number;
   };
+  sites: SiteStatusSummary[];
+};
 
-  for (const summary of hostMap.values()) {
-    summary.overallStatus = computeOverallStatus(summary.byStatus);
-    totals[summary.overallStatus]++;
-  }
+type EventRecord = {
+  id: string;
+  siteId: string | null;
+  siteName: string;
+  severity: string;
+  title: string;
+  message: string | null;
+  createdAt: string;
+  isPrimaryHost?: boolean;
+};
 
-  const hosts = Array.from(hostMap.values()).sort((a, b) =>
-    a.hostName.localeCompare(b.hostName, 'pt-BR'),
+type EventsApiResponse = {
+  ok: boolean;
+  events: EventRecord[];
+};
+
+// --------- COMPONENTE WRAPPER COM SUSPENSE --------- //
+
+export default function Page() {
+  return (
+    <Suspense fallback={null}>
+      <DashboardPage />
+    </Suspense>
   );
-
-  return { hosts, totals };
 }
 
-export default function DashboardPage() {
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [filter, setFilter] = useState<NormalizedStatus | 'ALL'>('ONLINE'); // começa em ONLINE como na Mocha
+// --------- DASHBOARD PRINCIPAL (CLIENT) --------- //
+
+type FilterKind = "all" | "online" | "unstable" | "offline";
+
+function DashboardPage() {
+  const searchParams = useSearchParams();
+  const tvMode = searchParams.get("tv") === "1";
+
+  const [sites, setSites] = useState<SiteStatusSummary[]>([]);
+  const [sitesStats, setSitesStats] = useState<SitesApiResponse["stats"] | null>(
+    null
+  );
+  const [sitesLoading, setSitesLoading] = useState(false);
+  const [sitesError, setSitesError] = useState<string | null>(null);
+
+  const [events, setEvents] = useState<EventRecord[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+
+  const [filter, setFilter] = useState<FilterKind>("all");
+
+  const tvScrollRef = useRef<HTMLDivElement | null>(null);
+  const eventsRef = useRef<HTMLDivElement | null>(null);
+
+  // --------- CARREGAMENTO SITES + EVENTOS --------- //
 
   useEffect(() => {
     let cancelled = false;
 
-    async function load() {
+    async function loadSitesAndEvents() {
       try {
-        setLoading(true);
-        setError(null);
-        const d = await fetchDashboardData();
+        setSitesLoading(true);
+        setSitesError(null);
+
+        const [sitesRes, eventsRes] = await Promise.all([
+          fetch("/api/unifi-cloud/sites"),
+          fetch("/api/events"),
+        ]);
+
+        if (!sitesRes.ok) {
+          throw new Error(`Erro HTTP sites ${sitesRes.status}`);
+        }
+        const sitesJson = (await sitesRes.json()) as SitesApiResponse;
+        if (!sitesJson.ok) {
+          throw new Error("Backend /api/unifi-cloud/sites retornou ok=false");
+        }
+
+        if (!eventsRes.ok) {
+          throw new Error(`Erro HTTP events ${eventsRes.status}`);
+        }
+        const eventsJson = (await eventsRes.json()) as EventsApiResponse;
+
         if (!cancelled) {
-          setData(d);
+          setSites(sitesJson.sites ?? []);
+          setSitesStats(sitesJson.stats ?? null);
+          setEvents(eventsJson.ok ? eventsJson.events ?? [] : []);
         }
       } catch (err: any) {
-        console.error('Erro ao carregar dados do dashboard', err);
+        console.error("[DashboardPage] erro ao carregar sites/eventos:", err);
         if (!cancelled) {
-          setError('Erro ao carregar dados do dashboard. Verifique a conexão com a UniFi Cloud.');
+          setSitesError(
+            err?.message ?? "Falha ao carregar dados dos sites UniFi."
+          );
         }
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        if (!cancelled) setSitesLoading(false);
       }
     }
 
-    load();
+    loadSitesAndEvents();
+
+    // refresh leve a cada 60s
+    const interval = window.setInterval(loadSitesAndEvents, 60_000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
     };
   }, []);
 
-  const totals = data?.totals ?? {
-    ONLINE: 0,
-    UNSTABLE: 0,
-    OFFLINE: 0,
-    UNKNOWN: 0,
-  };
+  // --------- AUTO-SCROLL EM MODO TV --------- //
 
-  const hosts = data?.hosts ?? [];
+  useEffect(() => {
+    if (!tvMode) return;
+    const container = tvScrollRef.current;
+    if (!container) return;
 
-  const filteredHosts =
-    filter === 'ALL'
-      ? hosts
-      : hosts.filter((h) => h.overallStatus === filter);
+    let direction = 1;
+    const step = 1;
+    const interval = window.setInterval(() => {
+      if (!container) return;
+      const maxScroll = container.scrollHeight - container.clientHeight;
 
-  const filterLabel =
-    filter === 'ALL'
-      ? 'TODOS'
-      : filter === 'ONLINE'
-      ? 'ONLINE'
-      : filter === 'OFFLINE'
-      ? 'OFFLINE'
-      : filter === 'UNSTABLE'
-      ? 'UNSTABLE'
-      : 'UNKNOWN';
+      if (container.scrollTop >= maxScroll - 2) {
+        direction = -1;
+      } else if (container.scrollTop <= 2) {
+        direction = 1;
+      }
+
+      container.scrollTop += step * direction;
+    }, 40);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [tvMode]);
+
+  // --------- DERIVADOS (STATS + FILTRO) --------- //
+
+  const {
+    totalSites,
+    totalOffline,
+    totalUnstable,
+    totalOperational,
+  } = useMemo(() => {
+    if (!sitesStats) {
+      const agg = sites.reduce(
+        (acc, s) => {
+          acc.totalSites += 1;
+          if (s.overallStatus === "online") acc.online += 1;
+          else if (s.overallStatus === "offline") acc.offline += 1;
+          else if (s.overallStatus === "unstable") acc.unstable += 1;
+          else acc.unknown += 1;
+
+          if (
+            s.overallStatus === "online" ||
+            s.overallStatus === "unstable"
+          ) {
+            acc.operational += 1;
+          }
+          return acc;
+        },
+        {
+          totalSites: 0,
+          online: 0,
+          offline: 0,
+          unstable: 0,
+          unknown: 0,
+          operational: 0,
+        }
+      );
+
+      return {
+        totalSites: agg.totalSites,
+        totalOffline: agg.offline,
+        totalUnstable: agg.unstable,
+        totalOperational: agg.operational,
+      };
+    }
+
+    return {
+      totalSites: sitesStats.totalSites,
+      totalOffline: sitesStats.offline,
+      totalUnstable: sitesStats.unstable,
+      totalOperational: sitesStats.operational,
+    };
+  }, [sites, sitesStats]);
+
+  const filteredSites = useMemo(() => {
+    if (!sites) return [];
+    switch (filter) {
+      case "online":
+        return sites.filter((s) => s.overallStatus === "online");
+      case "unstable":
+        return sites.filter((s) => s.overallStatus === "unstable");
+      case "offline":
+        return sites.filter((s) => s.overallStatus === "offline");
+      default:
+        return sites;
+    }
+  }, [sites, filter]);
+
+  const headerTitle = "Hype Watchdog";
+  const headerSubtitle = "Visão geral dos sites UniFi + eventos.";
+
+  // --------- RENDER --------- //
 
   return (
-    <main className="min-h-screen bg-[#050711] text-slate-100">
-      <div className="max-w-6xl mx-auto px-6 py-8">
-        <header className="mb-6">
-          <h1 className="text-2xl font-semibold">Overall Status (Hosts)</h1>
-          <p className="text-sm text-slate-400">
-            Monitorando {hosts.length} hosts (agrupados pela UniFi Cloud).
-          </p>
+    <div
+      className={`min-h-screen bg-slate-950 text-slate-50 ${
+        tvMode ? "overflow-hidden" : ""
+      }`}
+    >
+      <main className="max-w-6xl mx-auto px-4 py-4 flex flex-col gap-4">
+        {/* HEADER */}
+        <header>
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
+            <div>
+              <h1 className="text-2xl font-semibold tracking-tight">
+                {headerTitle}
+              </h1>
+              <p className="text-xs text-slate-400 mt-1">{headerSubtitle}</p>
+            </div>
+
+            <div className="text-right text-xs text-slate-400 space-y-[2px]">
+              <div>
+                <span className="font-semibold text-slate-100">
+                  {totalOperational}
+                </span>{" "}
+                / {totalSites} sites online ·{" "}
+                <span className="text-amber-300">{totalUnstable}</span>{" "}
+                instáveis ·{" "}
+                <span className="text-red-400">{totalOffline}</span> offline
+              </div>
+              <div className="text-[10px] text-slate-500">
+                TV mode: adicione{" "}
+                <code className="px-1 py-[1px] bg-slate-900 rounded">
+                  ?tv=1
+                </code>{" "}
+                na URL
+              </div>
+            </div>
+          </div>
+
+          {/* FILTROS */}
+          <div className="flex flex-wrap items-center gap-2 mb-2">
+            <FilterChip
+              active={filter === "all"}
+              onClick={() => setFilter("all")}
+            >
+              Todos
+            </FilterChip>
+            <FilterChip
+              active={filter === "online"}
+              onClick={() => setFilter("online")}
+            >
+              Online
+            </FilterChip>
+            <FilterChip
+              active={filter === "unstable"}
+              onClick={() => setFilter("unstable")}
+            >
+              Instáveis
+            </FilterChip>
+            <FilterChip
+              active={filter === "offline"}
+              onClick={() => setFilter("offline")}
+            >
+              Offline
+            </FilterChip>
+          </div>
         </header>
 
-        {/* Cards de status */}
-        <section className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <StatusCard
-            label="ONLINE"
-            value={totals.ONLINE}
-            description="Clique para filtrar hosts por status"
-            active={filter === 'ONLINE'}
-            color="from-emerald-700/80 to-emerald-500/40"
-            onClick={() => setFilter(filter === 'ONLINE' ? 'ALL' : 'ONLINE')}
-          />
-          <StatusCard
-            label="UNSTABLE"
-            value={totals.UNSTABLE}
-            description="Clique para filtrar hosts por status"
-            active={filter === 'UNSTABLE'}
-            color="from-amber-800/80 to-amber-500/40"
-            onClick={() => setFilter(filter === 'UNSTABLE' ? 'ALL' : 'UNSTABLE')}
-          />
-          <StatusCard
-            label="OFFLINE"
-            value={totals.OFFLINE}
-            description="Clique para filtrar hosts por status"
-            active={filter === 'OFFLINE'}
-            color="from-rose-900/80 to-rose-500/40"
-            onClick={() => setFilter(filter === 'OFFLINE' ? 'ALL' : 'OFFLINE')}
-          />
-          <StatusCard
-            label="UNKNOWN"
-            value={totals.UNKNOWN}
-            description="Clique para filtrar hosts por status"
-            active={filter === 'UNKNOWN'}
-            color="from-slate-900/80 to-slate-600/40"
-            onClick={() => setFilter(filter === 'UNKNOWN' ? 'ALL' : 'UNKNOWN')}
-          />
-        </section>
+        {/* CONTEÚDO ROLÁVEL EM MODO TV (SITES + EVENTOS) */}
+        <div
+          ref={tvScrollRef}
+          className={`mt-1 grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-4 items-start ${
+            tvMode ? "overflow-y-auto pr-1 pb-4" : ""
+          }`}
+          style={
+            tvMode
+              ? {
+                  maxHeight: "calc(100vh - 96px)",
+                }
+              : undefined
+          }
+        >
+          {/* Coluna esquerda: sites */}
+          <div className="flex flex-col gap-3">
+            <h2 className="text-xs uppercase tracking-[0.2em] text-slate-500 mb-1">
+              Sites monitorados
+            </h2>
 
-        {/* Aviso de erro, se tiver */}
-        {error && (
-          <div className="mb-4 rounded-lg border border-rose-700 bg-rose-950/60 px-4 py-3 text-sm text-rose-200">
-            {error}
-          </div>
-        )}
-
-        {/* Lista de sites/hosts */}
-        <section className="rounded-xl border border-slate-800 bg-slate-950/60 overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-            <div>
-              <h2 className="text-sm font-semibold">Sites (hosts principais)</h2>
-              <p className="text-xs text-slate-400">
-                Lista baseada no filtro selecionado nos cards acima.
-              </p>
-            </div>
-            <div className="text-xs text-slate-400">
-              Filtro atual:{' '}
-              <span className="font-semibold text-slate-200">{filterLabel}</span>
-            </div>
-          </div>
-
-          <div className="px-4 py-3 text-sm">
-            {loading && (
-              <p className="text-slate-400">Carregando hosts a partir da UniFi Cloud...</p>
-            )}
-
-            {!loading && filteredHosts.length === 0 && (
-              <p className="text-slate-400">
-                Nenhum host encontrado para o filtro atual.
-              </p>
-            )}
-
-            {!loading && filteredHosts.length > 0 && (
-              <div className="space-y-2">
-                {filteredHosts.map((host) => (
-                  <div
-                    key={host.hostName}
-                    className="flex flex-col md:flex-row md:items-center md:justify-between rounded-lg bg-slate-900/60 px-4 py-3"
-                  >
-                    <div>
-                      <div className="text-sm font-medium">{host.hostName}</div>
-                      <div className="text-xs text-slate-400">
-                        {host.totalDevices} devices &middot;{' '}
-                        {host.byStatus.ONLINE} online &middot;{' '}
-                        {host.byStatus.OFFLINE} offline &middot;{' '}
-                        {host.byStatus.UNSTABLE} unstable &middot;{' '}
-                        {host.byStatus.UNKNOWN} unknown
-                      </div>
-                    </div>
-                    <div className="mt-2 md:mt-0">
-                      <span
-                        className={
-                          'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ' +
-                          (host.overallStatus === 'ONLINE'
-                            ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/40'
-                            : host.overallStatus === 'OFFLINE'
-                            ? 'bg-rose-500/10 text-rose-300 border border-rose-500/40'
-                            : host.overallStatus === 'UNSTABLE'
-                            ? 'bg-amber-500/10 text-amber-300 border border-amber-500/40'
-                            : 'bg-slate-500/10 text-slate-300 border border-slate-500/40')
-                        }
-                      >
-                        {host.overallStatus}
-                      </span>
-                    </div>
-                  </div>
-                ))}
+            {sitesError && (
+              <div className="text-xs text-red-400 mb-2">
+                {sitesError} Verifique o backend UniFi.
               </div>
             )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+              {filteredSites.map((site, index) =>
+                renderSiteCard(site, index)
+              )}
+
+              {!sitesLoading && filteredSites.length === 0 && (
+                <div className="col-span-full text-sm text-slate-400 py-6 text-center border border-dashed border-slate-700 rounded-2xl">
+                  Nenhum site encontrado para o filtro atual.
+                </div>
+              )}
+            </div>
           </div>
-        </section>
-      </div>
-    </main>
+
+          {/* Coluna direita: eventos recentes */}
+          <aside className="flex flex-col gap-3">
+            <h2 className="text-xs uppercase tracking-[0.2em] text-slate-500 mb-1">
+              Eventos recentes
+            </h2>
+
+            <div
+              ref={eventsRef}
+              className={
+                "rounded-2xl border border-slate-800 bg-slate-900/40 p-3 min-h-[160px]" +
+                (tvMode ? "" : " max-h-[60vh] overflow-y-auto")
+              }
+            >
+              {eventsLoading && (
+                <div className="text-xs text-slate-400">
+                  Carregando eventos...
+                </div>
+              )}
+
+              {!eventsLoading && events.length === 0 && (
+                <div className="text-xs text-slate-500">
+                  Nenhum evento recente (ou DB offline).
+                </div>
+              )}
+
+              {!eventsLoading && events.length > 0 && (
+                <div className="space-y-2 text-xs">
+                  {events.slice(0, 50).map((ev) => (
+                    <div
+                      key={ev.id}
+                      className="flex items-start justify-between gap-2 border-b border-slate-800/70 pb-1 last:border-0 last:pb-0"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className={severityBadgeClasses(ev.severity)}>
+                            {ev.severity}
+                          </span>
+                          <span className="truncate max-w-[160px]">
+                            {ev.siteName}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-400 truncate">
+                          {ev.title}
+                        </div>
+                        {ev.message && (
+                          <div className="text-[10px] text-slate-500 line-clamp-2">
+                            {ev.message}
+                          </div>
+                        )}
+                      </div>
+                      <div className="text-right text-[10px] text-slate-500 whitespace-nowrap">
+                        {new Date(ev.createdAt).toLocaleTimeString("pt-BR", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                        {ev.isPrimaryHost && (
+                          <div className="text-[9px] text-emerald-300">
+                            host primário
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </aside>
+        </div>
+      </main>
+    </div>
   );
 }
 
-interface StatusCardProps {
-  label: string;
-  value: number;
-  description: string;
-  active?: boolean;
-  color: string; // gradient tailwind classes
-  onClick?: () => void;
-}
+// --------- COMPONENTES AUXILIARES --------- //
 
-function StatusCard({
-  label,
-  value,
-  description,
-  active,
-  color,
-  onClick,
-}: StatusCardProps) {
+function FilterChip(props: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  const { active, onClick, children } = props;
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`relative rounded-xl border px-4 py-4 text-left transition
-        ${
-          active
-            ? 'border-slate-100 bg-gradient-to-br ' + color + ' shadow-lg shadow-black/40'
-            : 'border-slate-800 bg-slate-950/60 hover:border-slate-500/70 hover:bg-slate-900/70'
-        }`}
+      className={`px-3 py-1 rounded-full text-xs border transition-colors ${
+        active
+          ? "bg-emerald-500/20 border-emerald-400 text-emerald-100"
+          : "bg-slate-900/50 border-slate-700 text-slate-300 hover:border-slate-500"
+      }`}
     >
-      <div className="text-xs font-semibold text-slate-400">{label}</div>
-      <div className="mt-2 text-3xl font-semibold">{value}</div>
-      <div className="mt-2 text-[11px] text-slate-400">{description}</div>
-      {active && (
-        <div className="absolute right-3 top-3 h-2 w-2 rounded-full bg-emerald-400 shadow shadow-emerald-400/80" />
-      )}
+      {children}
     </button>
   );
+}
+
+function renderSiteCard(site: SiteStatusSummary, index: number) {
+  const key = site.hostId ?? site.siteId ?? `${site.siteName}-${index}`;
+
+  const primaryStatus: "online" | "offline" | "unknown" =
+    site.overallStatus === "offline"
+      ? "offline"
+      : site.overallStatus === "unknown"
+      ? "unknown"
+      : "online";
+
+  const statusLabel = statusToLabel(primaryStatus);
+  const statusClasses = statusToBadgeClasses(primaryStatus);
+
+  const showUnstableChip = site.overallStatus === "unstable";
+
+  const total = site.deviceStats.total ?? 0;
+  const online = site.deviceStats.online ?? 0;
+  const offline = site.deviceStats.offline ?? 0;
+  const unstable = site.deviceStats.unstable ?? 0;
+
+  const controllerLabel =
+    site.controllerOnline === null
+      ? "unknown"
+      : site.controllerOnline
+      ? "online"
+      : "offline";
+
+  const wan1Label = site.wan1 ?? "N/A";
+  const wan2Label = site.wan2 ?? "N/A";
+
+  const siteDetailId = site.siteId ?? site.hostId ?? "";
+
+  return (
+    <Link
+      href={siteDetailId ? `/sites/${encodeURIComponent(siteDetailId)}` : "#"}
+      key={key}
+      className="block"
+    >
+      <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-3 flex flex-col gap-2 hover:border-slate-600 hover:bg-slate-900/70 transition-colors">
+        <div className="flex items-center justify-between gap-2">
+          <div className="font-medium text-sm truncate">{site.siteName}</div>
+
+          <div className="flex items-center gap-1">
+            <span className={statusClasses}>{statusLabel}</span>
+
+            {showUnstableChip && (
+              <span className="px-2 py-[2px] rounded-full text-[10px] font-semibold bg-amber-500/15 border border-amber-400 text-amber-200">
+                instável
+              </span>
+            )}
+          </div>
+        </div>
+
+        <div className="text-xs text-slate-400 flex flex-wrap gap-x-4 gap-y-1">
+          <span>
+            Dev:{" "}
+            <span className="text-emerald-300">
+              {online}/{total}
+            </span>
+          </span>
+          <span>
+            Off: <span className="text-red-400">{offline}</span>
+          </span>
+          <span>
+            Unst: <span className="text-amber-300">{unstable}</span>
+          </span>
+        </div>
+
+        <div className="text-[11px] text-slate-500 space-y-[2px] mt-1">
+          <div>
+            Ctr:{" "}
+            <span
+              className={
+                controllerLabel === "online"
+                  ? "text-emerald-300"
+                  : controllerLabel === "offline"
+                  ? "text-red-400"
+                  : "text-slate-400"
+              }
+            >
+              {controllerLabel}
+            </span>
+          </div>
+          <div>
+            WAN1:{" "}
+            <span
+              className={
+                wan1Label === "online"
+                  ? "text-emerald-300"
+                  : wan1Label === "offline"
+                  ? "text-red-400"
+                  : wan1Label === "unstable"
+                  ? "text-amber-300"
+                  : "text-slate-400"
+              }
+            >
+              {wan1Label}
+            </span>{" "}
+            WAN2:{" "}
+            <span
+              className={
+                wan2Label === "online"
+                  ? "text-emerald-300"
+                  : wan2Label === "offline"
+                  ? "text-red-400"
+                  : wan2Label === "unstable"
+                  ? "text-amber-300"
+                  : "text-slate-400"
+              }
+            >
+              {wan2Label}
+            </span>
+          </div>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+function statusToLabel(status: "online" | "offline" | "unknown"): string {
+  if (status === "online") return "ONLINE";
+  if (status === "offline") return "OFFLINE";
+  return "UNKNOWN";
+}
+
+function statusToBadgeClasses(
+  status: "online" | "offline" | "unknown"
+): string {
+  const base =
+    "px-3 py-[3px] rounded-full text-[11px] font-semibold border inline-flex items-center";
+  if (status === "online") {
+    return `${base} bg-emerald-500/15 border-emerald-500 text-emerald-200`;
+  }
+  if (status === "offline") {
+    return `${base} bg-red-500/15 border-red-500 text-red-200`;
+  }
+  return `${base} bg-slate-700/40 border-slate-500 text-slate-200`;
+}
+
+function severityBadgeClasses(severity: string): string {
+  const base =
+    "inline-flex items-center justify-center px-2 py-[1px] rounded-full text-[10px] font-semibold border";
+  const sev = severity.toUpperCase();
+  if (sev === "CRITICAL") {
+    return `${base} bg-red-500/15 border-red-500 text-red-200`;
+  }
+  if (sev === "WARNING") {
+    return `${base} bg-amber-500/15 border-amber-400 text-amber-200`;
+  }
+  if (sev === "INFO") {
+    return `${base} bg-sky-500/15 border-sky-400 text-sky-200`;
+  }
+  return `${base} bg-slate-700/40 border-slate-500 text-slate-200`;
 }

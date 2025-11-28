@@ -12,64 +12,87 @@ model Site {
   name             String
   externalSiteId   String        @unique
   isActive         Boolean       @default(true)
-  normalizedStatus String?       // ONLINE / OFFLINE / UNSTABLE / UNKNOWN
+  normalizedStatus String?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
-
+  apiLogs          ApiLog[]
   devices          Device[]
   events           DeviceEvent[]
-  apiLogs          ApiLog[]
 }
 
 model Device {
-  id                 Int       @id @default(autoincrement())
+  id                 Int           @id @default(autoincrement())
   siteId             Int
   externalDeviceId   String
   name               String?
   modelType          String?
   ipAddress          String?
   rawStatus          String?
-  normalizedStatus   String?   // ONLINE / OFFLINE / UNSTABLE / UNKNOWN
+  normalizedStatus   String?
   lastSeenAt         DateTime?
   lastStatusChangeAt DateTime?
-  vendor             String?   @default("unifi")
-
-  isPrimaryHost      Boolean   @default(false)
-  wan1Status         String?   // ONLINE / OFFLINE / UNKNOWN
+  vendor             String?       @default("unifi")
+  isPrimaryHost      Boolean       @default(false)
+  wan1Status         String?
   wan2Status         String?
   wan1LastChange     DateTime?
   wan2LastChange     DateTime?
-
-  site               Site      @relation(fields: [siteId], references: [id])
-  events             DeviceEvent[]
   apiLogs            ApiLog[]
+  site               Site          @relation(fields: [siteId], references: [id])
+  events             DeviceEvent[]
 }
 
 model DeviceEvent {
-  id         Int       @id @default(autoincrement())
+  id         Int      @id @default(autoincrement())
   deviceId   Int
   siteId     Int
-  eventType  String    // status_change, test_alert, etc.
-  severity   String    // INFO, WARNING, CRITICAL
+  eventType  String
+  severity   String
   title      String
   message    String?
   rawPayload String?
-  createdAt  DateTime  @default(now())
-
-  device     Device    @relation(fields: [deviceId], references: [id])
-  site       Site      @relation(fields: [siteId], references: [id])
+  createdAt  DateTime @default(now())
+  device     Device   @relation(fields: [deviceId], references: [id])
+  site       Site     @relation(fields: [siteId], references: [id])
 }
 
 model ApiLog {
-  id                 Int       @id @default(autoincrement())
-  siteId             Int?
-  deviceId           Int?
-  context            String
-  rawStatusFromApi   String?
-  calculatedStatus   String?
-  reason             String?
-  createdAt          DateTime  @default(now())
+  id               Int      @id @default(autoincrement())
+  siteId           Int?
+  deviceId         Int?
+  context          String
+  rawStatusFromApi String?
+  calculatedStatus String?
+  reason           String?
+  createdAt        DateTime @default(now())
+  device           Device?  @relation(fields: [deviceId], references: [id])
+  site             Site?    @relation(fields: [siteId], references: [id])
+}
 
-  site               Site?     @relation(fields: [siteId], references: [id])
-  device             Device?   @relation(fields: [deviceId], references: [id])
+model SiteStatusSnapshot {
+  id             Int       @id @default(autoincrement())
+  key            String    @unique
+  siteId         String?
+  hostId         String?
+  siteName       String
+  overallStatus  String
+  totalDevices   Int
+  offlineDevices Int
+  lastChangeAt   DateTime?
+  createdAt      DateTime  @default(now())
+}
+
+model Event {
+  id            Int      @id @default(autoincrement())
+  siteKey       String?
+  siteId        String?
+  hostId        String?
+  siteName      String
+  deviceName    String?
+  severity      String
+  type          String
+  title         String
+  message       String?
+  isPrimaryHost Boolean  @default(false)
+  createdAt     DateTime @default(now())
 }
