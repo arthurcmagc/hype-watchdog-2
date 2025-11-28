@@ -1,8 +1,13 @@
 // src/lib/siteStatus.ts
-
-// ---------------------------------------------------------------------------
-// Tipos básicos
-// ---------------------------------------------------------------------------
+//
+// Lógica de status de sites UniFi (hosts do UniFi Cloud) usada pelo dashboard.
+//
+// Objetivos:
+//  - Detectar "sites zumbis" usando deviceHost.updatedAt (host muito antigo).
+//  - Corrigir falsos OFFLINE (CTMIG, OKAY, etc.) usando statistics.counts.
+//  - Respeitar as regras de WAN / devices / controller / hints que você descreveu.
+//  - Manter a estrutura de SiteStatusSummary compatível com o resto do projeto.
+//
 
 export type OverallStatus = "online" | "offline" | "unstable" | "unknown";
 
@@ -12,6 +17,14 @@ export interface DeviceStats {
   offline: number;
   unstable: number;
   unknown: number;
+}
+
+export interface StrongOfflineHint {
+  strongOfflineHint: boolean;
+  totalDevice: number | null;
+  offlineDevice: number | null;
+  gatewayDevice: number | null;
+  offlineGatewayDevice: number | null;
 }
 
 export interface SiteStatusSummary {
@@ -26,26 +39,130 @@ export interface SiteStatusSummary {
   debug?: {
     rawSiteSample?: any;
     deviceHostSample?: any;
-    countsHint?: ReturnType<typeof computeStrongOfflineHint>;
+    countsHint?: StrongOfflineHint;
     devicesStatus?: OverallStatus;
+    isStale?: boolean;
+    forcedOnlineByCounts?: boolean;
   };
 }
 
 export function emptyDeviceStats(): DeviceStats {
-  return {
-    total: 0,
+  return { total: 0, online: 0, offline: 0, unstable: 0, unknown: 0 };
+}
+
+// ---------------------------------------------------------------------------
+// Devices helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Regras:
+ *  - Considera apenas devices com isManaged !== false.
+ *  - Se existir console e houver outros devices, NÃO conta o console.
+ *  - Qualquer status diferente de "online" conta como offline.
+ */
+export function computeDeviceStatsFromHost(
+  deviceHost: any | null | undefined
+): DeviceStats {
+  if (!deviceHost || !Array.isArray(deviceHost.devices)) {
+    return emptyDeviceStats();
+  }
+
+  const managed = deviceHost.devices.filter(
+    (d: any) => d && d.isManaged !== false
+  );
+
+  if (managed.length === 0) {
+    return emptyDeviceStats();
+  }
+
+  const consoleDev = managed.find((d: any) => d?.isConsole === true);
+  const realDevices =
+    consoleDev && managed.length > 1
+      ? managed.filter((d: any) => !d?.isConsole)
+      : managed;
+
+  const stats: DeviceStats = {
+    total: realDevices.length,
     online: 0,
     offline: 0,
     unstable: 0,
     unknown: 0,
   };
+
+  for (const dev of realDevices) {
+    const st = String(dev.status ?? "").toLowerCase();
+    if (st === "online") {
+      stats.online += 1;
+    } else {
+      // qualquer coisa diferente de "online" entra como offline
+      stats.offline += 1;
+    }
+  }
+
+  return stats;
+}
+
+/**
+ * Status agregado de devices:
+ *  - totalDevices === 0 → "online" (não derruba site só porque não tem device gerenciável).
+ *  - offlineDevices === 0 → "online".
+ *  - razão offline / total:
+ *      >= 0.5  → "offline"
+ *      >= 0.1  → "unstable"
+ *      <  0.1  → "online"
+ */
+export function computeDevicesStatus(
+  totalDevices: number,
+  offlineDevices: number
+): OverallStatus {
+  if (totalDevices === 0) return "online";
+  if (offlineDevices === 0) return "online";
+
+  const ratio = offlineDevices / totalDevices;
+  if (ratio >= 0.5) return "offline";
+  if (ratio >= 0.1) return "unstable";
+  return "online";
+}
+
+/**
+ * Descobre o status do "controller" (UDM/console) a partir dos devices.
+ *
+ * Regras:
+ *  - Se não existir console → null.
+ *  - status === "online" → true.
+ *  - Qualquer outro status string → false.
+ */
+export function controllerOnlineFromDeviceHost(
+  deviceHost: any | null | undefined
+): boolean | null {
+  if (!deviceHost || !Array.isArray(deviceHost.devices)) return null;
+
+  const consoleDev = deviceHost.devices.find((d: any) => d?.isConsole);
+  if (!consoleDev) return null;
+
+  const st = String(consoleDev.status ?? "").toLowerCase();
+  if (st === "online") return true;
+  if (st) return false;
+  return null;
 }
 
 // ---------------------------------------------------------------------------
-// Helpers de WAN
+// WAN helpers
 // ---------------------------------------------------------------------------
 
-function mapWanStatus(wan: any | undefined | null): OverallStatus | null {
+/**
+ * Converte dados brutos de WAN da UniFi Cloud em OverallStatus.
+ *
+ * Regras:
+ *  - wanUptime === 0             → "offline"
+ *  - wanUptime < 80              → "offline"
+ *  - issues com downtime/latency → "unstable" (se uptime !== 0)
+ *  - wanUptime > 95 sem issues   → "online"
+ *  - Sem info consistente        → "unknown"
+ */
+export function mapWanStatus(
+  wan: any | null | undefined
+): OverallStatus | null {
   if (!wan) return null;
 
   const issues = Array.isArray(wan.wanIssues) ? wan.wanIssues : [];
@@ -59,265 +176,229 @@ function mapWanStatus(wan: any | undefined | null): OverallStatus | null {
       ? wan.percentages.wanUptime
       : null;
 
-  const uptime =
-    typeof uptimeRaw === "number"
-      ? uptimeRaw
-      : typeof uptimeRaw === "string"
-      ? Number(uptimeRaw)
-      : null;
+  if (uptimeRaw === null || uptimeRaw === undefined) {
+    if (hasDowntime) return "offline";
+    if (hasHighLatency) return "unstable";
+    return "unknown";
+  }
 
-  // 1) uptime 0 -> offline seco
+  const uptime = Number(uptimeRaw);
+  if (!Number.isFinite(uptime)) return "unknown";
+
   if (uptime === 0) return "offline";
-
-  // 2) qualquer downtime/latência alta -> unstable
-  if (hasDowntime || hasHighLatency) return "unstable";
-
-  // 3) sem uptime confiável
-  if (uptime == null || Number.isNaN(uptime)) return "unknown";
-
-  // 4) uptime < 80 -> offline
   if (uptime < 80) return "offline";
 
-  // 5) uptime > 95 -> online
-  if (uptime > 95) return "online";
+  if ((hasDowntime || hasHighLatency) && uptime !== 0) {
+    return "unstable";
+  }
 
-  // 6) meio termo -> online (não vamos pirar por 90% de uptime)
-  return "online";
-}
+  if (uptime > 95 && !hasDowntime && !hasHighLatency) {
+    return "online";
+  }
 
-function normalizeStatus(
-  value: string | null | undefined
-): OverallStatus {
-  if (!value) return "unknown";
-  const v = String(value).toLowerCase();
-  if (v === "online" || v === "offline" || v === "unstable" || v === "unknown")
-    return v as OverallStatus;
   return "unknown";
 }
 
 // ---------------------------------------------------------------------------
-// Controller + Devices
+// Hints de statistics.counts (sites zumbis / reconciliar devices)
 // ---------------------------------------------------------------------------
-
-function controllerOnlineFromDeviceHost(
-  deviceHost: any | null | undefined
-): boolean | null {
-  if (!deviceHost || !Array.isArray(deviceHost.devices)) return null;
-  const consoleDevice = deviceHost.devices.find((d: any) => d && d.isConsole);
-  if (!consoleDevice) return null;
-
-  const status = typeof consoleDevice.status === "string"
-    ? consoleDevice.status.toLowerCase()
-    : "";
-
-  if (status === "online") return true;
-  if (!status) return null;
-  return false;
-}
 
 /**
- * Devices:
- * - ignora unmanaged (isManaged === false)
- * - se tem console, conta só devices não-console;
- *   se não tiver nenhum não-console, conta só o console.
- * - qualquer status !== "online" entra como offline (pending adoption, etc).
+ * Hint forte de que "tudo está offline", baseado em statistics.counts.
+ *
+ * Regras (como você descreveu):
+ *  - se offlineDevice >= totalDevice         → strongOfflineHint = true
+ *  - se offlineGatewayDevice >= gatewayDevice → strongOfflineHint = true
  */
-function computeDeviceStatsFromHost(deviceHost: any | null | undefined): DeviceStats {
-  if (!deviceHost || !Array.isArray(deviceHost.devices)) {
-    return emptyDeviceStats();
-  }
-
-  const managed = (deviceHost.devices as any[]).filter(
-    (d) => d && d.isManaged !== false
-  );
-
-  const consoleDevice = managed.find((d) => d.isConsole);
-  let considered: any[];
-
-  if (consoleDevice) {
-    const nonConsole = managed.filter((d) => !d.isConsole);
-    considered = nonConsole.length > 0 ? nonConsole : [consoleDevice];
-  } else {
-    considered = managed;
-  }
-
-  const total = considered.length;
-  let offline = 0;
-
-  for (const d of considered) {
-    const status = typeof d.status === "string" ? d.status.toLowerCase() : "";
-    if (status && status !== "online") offline += 1;
-  }
-
-  const online = Math.max(total - offline, 0);
-
-  return {
-    total,
-    online,
-    offline,
-    unstable: 0,
-    unknown: 0,
-  };
-}
-
-/**
- * - 0 devices       -> "online" (não derruba site)
- * - 0 offline       -> "online"
- * - >= 50% offline  -> "offline"
- * - 10–49% offline  -> "unstable"
- * - < 10% offline   -> "online"
- */
-function computeDevicesStatus(
-  totalDevices: number,
-  offlineDevices: number
-): OverallStatus {
-  if (totalDevices === 0) return "online";
-  if (offlineDevices === 0) return "online";
-
-  const ratio = offlineDevices / totalDevices;
-  if (ratio >= 0.5) return "offline";
-  if (ratio >= 0.1) return "unstable";
-  return "online";
-}
-
-// ---------------------------------------------------------------------------
-// Hints baseados em rawSite.statistics.counts (sites zumbis)
-// ---------------------------------------------------------------------------
-
-function computeStrongOfflineHint(rawSite: any | undefined | null): {
-  strongOfflineHint: boolean;
-  totalDevice: number | null;
-  offlineDevice: number | null;
-  gatewayDevice: number | null;
-  offlineGatewayDevice: number | null;
-} {
+export function computeStrongOfflineHint(rawSite: any): StrongOfflineHint {
   const counts = rawSite?.statistics?.counts ?? {};
 
-  const totalDevice =
+  const total =
     typeof counts.totalDevice === "number" ? counts.totalDevice : null;
-  const offlineDevice =
+  const offline =
     typeof counts.offlineDevice === "number" ? counts.offlineDevice : null;
-  const gatewayDevice =
+  const gateway =
     typeof counts.gatewayDevice === "number" ? counts.gatewayDevice : null;
-  const offlineGatewayDevice =
+  const offlineG =
     typeof counts.offlineGatewayDevice === "number"
       ? counts.offlineGatewayDevice
       : null;
 
   let strongOfflineHint = false;
 
-  // todos devices offline
   if (
-    totalDevice !== null &&
-    totalDevice > 0 &&
-    offlineDevice !== null &&
-    offlineDevice >= totalDevice
+    total !== null &&
+    total > 0 &&
+    offline !== null &&
+    offline >= total
   ) {
     strongOfflineHint = true;
   }
 
-  // todos gateways offline
   if (
-    gatewayDevice !== null &&
-    gatewayDevice > 0 &&
-    offlineGatewayDevice !== null &&
-    offlineGatewayDevice >= gatewayDevice
+    gateway !== null &&
+    gateway > 0 &&
+    offlineG !== null &&
+    offlineG >= gateway
   ) {
     strongOfflineHint = true;
   }
 
   return {
     strongOfflineHint,
-    totalDevice,
-    offlineDevice,
-    gatewayDevice,
-    offlineGatewayDevice,
+    totalDevice: total,
+    offlineDevice: offline,
+    gatewayDevice: gateway,
+    offlineGatewayDevice: offlineG,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Lógica principal de status
+// Zumbi / Stale host
 // ---------------------------------------------------------------------------
 
-function computeOverallStatus(params: {
-  totalDevices: number;
-  offlineDevices: number;
+/**
+ * Considera o host "stale" (zumbi) se o updatedAt dele ficou velho demais.
+ *
+ * Aqui usamos um limiar BEM MAIS LONGO que 2h para não derrubar tudo.
+ * Ex: 7 dias.
+ *
+ * Importante:
+ *  - Se não houver updatedAt, NÃO marcamos como stale.
+ */
+export function isHostStale(
+  deviceHost: any | null | undefined,
+  maxAgeMinutes = 60 * 24 * 7 // 7 dias
+): boolean {
+  if (!deviceHost?.updatedAt) return false;
+
+  const lastUpdate = new Date(deviceHost.updatedAt).getTime();
+  if (!Number.isFinite(lastUpdate)) return false;
+
+  const now = Date.now();
+  const diffMinutes = (now - lastUpdate) / 1000 / 60;
+
+  return diffMinutes > maxAgeMinutes;
+}
+
+// ---------------------------------------------------------------------------
+// OverallStatus agregando tudo
+// ---------------------------------------------------------------------------
+
+function consolidateWans(
+  wan1Status: OverallStatus | null,
+  wan2Status: OverallStatus | null
+): OverallStatus {
+  const vals = [wan1Status, wan2Status].filter(
+    (v): v is OverallStatus =>
+      v === "online" || v === "offline" || v === "unstable" || v === "unknown"
+  );
+
+  if (vals.length === 0) return "unknown";
+  if (vals.includes("offline")) return "offline";
+  if (vals.includes("unstable")) return "unstable";
+  if (vals.includes("online")) return "online";
+  return "unknown";
+}
+
+/**
+ * Regras de overallStatus (seu resumo):
+ *
+ * unknown:
+ *   - sem dados de WAN (ambas unknown/null);
+ *   - totalDevices === 0;
+ *   - controllerOnline === null.
+ *
+ * offline:
+ *   - strongOfflineHint && controllerOnline === false;
+ *   - OU todos os devices reais offline E (controllerOnline === false OU WAN consolidado "offline");
+ *   - OU totalDevices === 0 E (controllerOnline === false OU WAN consolidado "offline").
+ *
+ * unstable:
+ *   - controller offline, mas ainda existem devices reais online;
+ *   - OU devices aggregated "unstable";
+ *   - OU WAN consolidada "unstable".
+ *
+ * online:
+ *   - todo resto em que o agregado de devices é "online".
+ */
+export function computeOverallStatus(input: {
+  deviceStats: DeviceStats;
   wan1Status: OverallStatus | null;
   wan2Status: OverallStatus | null;
   controllerOnline: boolean | null;
   strongOfflineHint: boolean;
 }): OverallStatus {
-  const {
-    totalDevices,
-    offlineDevices,
-    wan1Status,
-    wan2Status,
-    controllerOnline,
-    strongOfflineHint,
-  } = params;
+  const { deviceStats, wan1Status, wan2Status, controllerOnline, strongOfflineHint } =
+    input;
 
-  const devicesStatus = computeDevicesStatus(totalDevices, offlineDevices);
+  const totalDevices = deviceStats.total;
+  const offlineDevices = deviceStats.offline;
 
-  const w1 = normalizeStatus(wan1Status);
-  const w2 = normalizeStatus(wan2Status);
+  const devicesAgg = computeDevicesStatus(totalDevices, offlineDevices);
+  const wanCombined = consolidateWans(wan1Status, wan2Status);
+  const wanIsKnown =
+    wanCombined === "online" ||
+    wanCombined === "offline" ||
+    wanCombined === "unstable";
 
-  const knownWans = [w1, w2].filter((s) => s !== "unknown");
-  const anyWanOffline = knownWans.some((s) => s === "offline");
-  const anyWanUnstable = knownWans.some((s) => s === "unstable");
-  const noWanInfo = knownWans.length === 0;
-
-  const allDevicesOffline =
-    totalDevices > 0 && offlineDevices === totalDevices;
-
-  // 1) completamente cego
-  if (noWanInfo && totalDevices === 0 && controllerOnline == null) {
+  // 1) unknown puro
+  if (totalDevices === 0 && controllerOnline === null && !wanIsKnown) {
     return "unknown";
   }
 
-  // 2) hint forte de site zumbi -> offline
-  if (strongOfflineHint) {
+  // 2) Hint forte de tudo morto + controller offline → offline direto
+  if (strongOfflineHint && controllerOnline === false) {
     return "offline";
   }
 
-  // 3) todos devices reais offline + (controller offline OU WAN offline)
+  // 3) Offline por devices + controller/WAN
   if (
-    allDevicesOffline &&
-    (controllerOnline === false || anyWanOffline)
+    totalDevices > 0 &&
+    offlineDevices >= totalDevices &&
+    (controllerOnline === false || wanCombined === "offline")
   ) {
     return "offline";
   }
 
-  // 4) sem devices, mas controller offline ou WAN offline
-  if (totalDevices === 0 && (controllerOnline === false || anyWanOffline)) {
+  if (
+    totalDevices === 0 &&
+    (controllerOnline === false || wanCombined === "offline")
+  ) {
     return "offline";
   }
 
-  // 5) controller offline mas ainda há devices vivos -> unstable
-  if (controllerOnline === false && !allDevicesOffline && totalDevices > 0) {
+  // 4) Unstable:
+  //    - controller offline mas ainda existem devices online
+  //    - ou agregado de devices "unstable"
+  //    - ou WAN consolidada "unstable"
+  if (
+    controllerOnline === false &&
+    totalDevices > 0 &&
+    offlineDevices < totalDevices
+  ) {
     return "unstable";
   }
 
-  // 6) devices agregados dizem "offline" (ex: maioria esmagadora caiu)
-  if (devicesStatus === "offline") {
-    return "offline";
-  }
-
-  // 7) devices agregados dizem "unstable"
-  if (devicesStatus === "unstable") {
+  if (devicesAgg === "unstable") {
     return "unstable";
   }
 
-  // 8) WAN instável
-  if (anyWanUnstable) {
+  if (wanCombined === "unstable") {
     return "unstable";
   }
 
-  // 9) default = online
-  return "online";
+  // 5) Se devicesAgg é "online" e não temos evidência forte do contrário → online
+  if (devicesAgg === "online") {
+    return "online";
+  }
+
+  // Last resort: unknown
+  return "unknown";
 }
 
 // ---------------------------------------------------------------------------
-// Função principal
+// Função principal: converte rawSite + deviceHost -> SiteStatusSummary
 // ---------------------------------------------------------------------------
 
 export function computeSiteStatus(input: {
@@ -335,20 +416,22 @@ export function computeSiteStatus(input: {
     rawSite?.host_id ??
     deviceHost?.hostId ??
     deviceHost?.id ??
+    deviceHost?._id ??
     null;
 
-  // Nome
-  const metaDesc: string | undefined =
+  // Nome do site
+  const descRaw =
     typeof rawSite?.meta?.desc === "string"
       ? rawSite.meta.desc.trim()
-      : undefined;
-  const cleanMetaDesc =
-    metaDesc && metaDesc.toLowerCase() !== "default" ? metaDesc : undefined;
+      : "";
+
+  const cleanDesc =
+    descRaw && descRaw.toLowerCase() !== "default" ? descRaw : "";
 
   let siteName: string =
+    cleanDesc ||
     (deviceHost?.hostName && String(deviceHost.hostName).trim()) ||
     (deviceHost?.name && String(deviceHost.name).trim()) ||
-    cleanMetaDesc ||
     (rawSite?.meta?.name && String(rawSite.meta.name).trim()) ||
     (rawSite?.siteName && String(rawSite.siteName).trim()) ||
     "Unknown";
@@ -357,33 +440,114 @@ export function computeSiteStatus(input: {
     siteName = "Unknown";
   }
 
-  // Controller
-  const controllerOnline = controllerOnlineFromDeviceHost(deviceHost);
+  // Controller + devices
+  let controllerOnline = controllerOnlineFromDeviceHost(deviceHost);
+  let deviceStats = computeDeviceStatsFromHost(deviceHost);
+
+  // Hints de counts
+  const countsHint = computeStrongOfflineHint(rawSite);
 
   // WANs
   const wans = rawSite?.statistics?.wans;
   let wan1Status = mapWanStatus(wans?.WAN);
   let wan2Status = mapWanStatus(wans?.WAN2);
 
-  // Devices
-  const deviceStats = computeDeviceStatsFromHost(deviceHost);
+  // Stale / zumbi
+  const stale = isHostStale(deviceHost);
 
-  // Hint de site zumbi
-  const countsHint = computeStrongOfflineHint(rawSite);
+  // Flag para debug
+  let forcedOnlineByCounts = false;
 
-  // Se counts dizem "tudo morto" + controller offline, não faz sentido WAN online
+  // -----------------------------------------------------------------------
+  // 1) SITE ZUMBI (host stale): host desatualizado há muitos dias.
+  //
+  // Nestes casos, mesmo que counts diga offlineDevice = 0, você quer
+  // tratar o site como "morto" / legado. Então:
+  //   - controller vira offline;
+  //   - WAN online vira offline;
+  //   - devices todos offline.
+  // -----------------------------------------------------------------------
+  if (stale) {
+    controllerOnline = false;
+
+    if (wan1Status === "online") wan1Status = "offline";
+    if (wan2Status === "online") wan2Status = "offline";
+
+    const totalRef =
+      (countsHint.totalDevice !== null && countsHint.totalDevice > 0
+        ? countsHint.totalDevice
+        : deviceStats.total) || 0;
+
+    deviceStats = {
+      total: totalRef,
+      online: 0,
+      offline: totalRef,
+      unstable: 0,
+      unknown: 0,
+    };
+  }
+
+  // -----------------------------------------------------------------------
+  // 2) FALSO OFFLINE (API bug): devices todos offline, mas counts dizendo
+  //    que ninguém está offline (CTMIG, OKAY, etc.).
+  //
+  // Situação:
+  //   - NÃO estamos em host stale;
+  //   - counts.totalDevice > 0;
+  //   - counts.offlineDevice === 0;
+  //   - deviceStats.total > 0;
+  //   - deviceStats.offline === deviceStats.total.
+  //
+  // Nestes casos, confiamos em counts e consideramos todos devices ONLINE.
+  // -----------------------------------------------------------------------
+  const totalDevice = countsHint.totalDevice;
+  const offlineDevice = countsHint.offlineDevice;
+
+  if (
+    !stale &&
+    totalDevice !== null &&
+    totalDevice > 0 &&
+    offlineDevice === 0 &&
+    deviceStats.total > 0 &&
+    deviceStats.offline === deviceStats.total
+  ) {
+    forcedOnlineByCounts = true;
+
+    deviceStats = {
+      ...deviceStats,
+      online: deviceStats.total,
+      offline: 0,
+    };
+
+    // Se gateway está 100% OK, faz sentido assumir controller online também.
+    if (
+      countsHint.gatewayDevice !== null &&
+      countsHint.gatewayDevice > 0 &&
+      (countsHint.offlineGatewayDevice === null ||
+        countsHint.offlineGatewayDevice === 0)
+    ) {
+      controllerOnline = true;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 3) counts dizem "tudo morto" + controller offline → WAN não pode estar online
+  //    (regra original de zumbi por counts).
+  // -----------------------------------------------------------------------
   if (countsHint.strongOfflineHint && controllerOnline === false) {
     if (wan1Status === "online") wan1Status = "offline";
     if (wan2Status === "online") wan2Status = "offline";
   }
 
+  // strongOfflineHint final leva em conta counts E stale
+  const strongOfflineFlag = countsHint.strongOfflineHint || stale;
+
   const overallStatus = computeOverallStatus({
-    totalDevices: deviceStats.total,
-    offlineDevices: deviceStats.offline,
+    deviceStats,
     wan1Status,
     wan2Status,
     controllerOnline,
-    strongOfflineHint: countsHint.strongOfflineHint,
+    strongOfflineHint: strongOfflineFlag,
   });
 
   return {
@@ -399,10 +563,9 @@ export function computeSiteStatus(input: {
       rawSiteSample: rawSite,
       deviceHostSample: deviceHost,
       countsHint,
-      devicesStatus: computeDevicesStatus(
-        deviceStats.total,
-        deviceStats.offline
-      ),
+      devicesStatus: computeDevicesStatus(deviceStats.total, deviceStats.offline),
+      isStale: stale,
+      forcedOnlineByCounts,
     },
   };
 }
