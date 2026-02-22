@@ -1,36 +1,97 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 🛡️ WatchDog – Protótipo de Monitoramento Inteligente de Conectividade (Base do HypeShield, NOC em desenvolvimento e em produção real)
 
-## Getting Started
+## Visão Geral
 
-First, run the development server:
+O WatchDog é um protótipo de sistema de monitoramento de conectividade orientado a eventos, desenvolvido como base conceitual do projeto HypeShield.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+O objetivo principal foi validar uma arquitetura de NOC inteligente capaz de reduzir falsos positivos, flapping e ruído operacional em monitoramento de links e infraestrutura.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Este projeto representa uma abordagem prática de observabilidade com lógica contextual, ao invés de monitoramento reativo tradicional.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+---
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Problema que o projeto resolve
 
-## Learn More
+Sistemas de monitoramento tradicionais geram:
+- Muitos alertas falsos
+- Flapping de status (UP/DOWN instável)
+- Ruído operacional excessivo
+- Decisões ainda dependentes de análise humana
 
-To learn more about Next.js, take a look at the following resources:
+O WatchDog foi criado para:
+- Validar mudanças reais de estado
+- Reduzir spam de eventos
+- Simular uma arquitetura de NOC inteligente
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+---
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Conceito Central: Golden Logic
 
-## Deploy on Vercel
+A lógica do sistema segue o princípio:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+> Um evento só existe quando há uma mudança real de estado validada por contexto, persistência e confiabilidade.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Isso evita:
+- Alertas inconsistentes
+- Estados “zumbis”
+- Painéis operacionais imprecisos
+
+---
+
+## Arquitetura Técnica
+
+- Backend em Node.js / TypeScript
+- Banco de dados PostgreSQL
+- Docker (ambiente local)
+- Processamento orientado a eventos
+- Estrutura preparada para API e collectors
+
+O projeto foi construído manualmente em ambiente local (localhost), com foco em validação arquitetural.
+
+---
+
+## Tecnologias Utilizadas
+
+- TypeScript
+- Node.js
+- PostgreSQL
+- Docker
+- Arquitetura orientada a eventos
+
+---
+
+## Observação de Segurança
+
+Nesta versão pública:
+- APIs estão desativadas
+- Integrações externas removidas
+- Dados sensíveis não incluídos
+
+Isso foi feito por motivos de confidencialidade e segurança da arquitetura original.
+
+---
+
+## Diferenciais Técnicos
+
+- Debounce lógico de eventos
+- Validação de estado anterior vs atual
+- Processamento idempotente
+- Redução de ruído operacional
+- Foco em confiabilidade operacional (NOC / Infra)
+
+---
+
+## Evolução
+
+Este protótipo evoluiu conceitualmente para um sistema mais robusto de proteção operacional (HypeShield), com foco em:
+- Observabilidade inteligente
+- Self-healing
+- Proteção de infraestrutura
+- Decisão técnica automatizada
+
+---
+
+## Autor
+
+Arthur Barbosa Sodré  
+Desenvolvedor focado em Automação, Monitoramento Inteligente e Engenharia de Infraestrutura.
